@@ -8,6 +8,8 @@ import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
+import android.view.HapticFeedbackConstants;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
@@ -32,7 +34,7 @@ import java.nio.charset.StandardCharsets;
 public class MainActivity extends Activity {
 
     private static final String START_URL = "file:///android_asset/index.html";
-    private static final String STATE_FILE = "state.json";
+    private static final String STATE_FILE = Reminders.STATE_FILE;
     private static final int REQ_EXPORT = 11;
     private static final int REQ_IMPORT = 12;
 
@@ -68,14 +70,17 @@ public class MainActivity extends Activity {
         setContentView(web);
         web.loadUrl(START_URL);
 
-        // Re-arm the daily reminder (alarms are dropped on app updates).
+        // Re-arm reminders (alarms are dropped on app updates and force-stops).
         Reminders.schedule(this);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        if (web != null) web.onResume();
+        if (web != null) {
+            web.onResume();
+            js("window.onNotifChanged && window.onNotifChanged()");
+        }
     }
 
     @Override
@@ -136,6 +141,20 @@ public class MainActivity extends Activity {
             } catch (Exception e) {
                 js("window.onBackupPicked && window.onBackupPicked('not a backup')");
             }
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        js("window.onNotifChanged && window.onNotifChanged()");
+    }
+
+    private void askNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1);
         }
     }
 
@@ -211,21 +230,53 @@ public class MainActivity extends Activity {
             });
         }
 
+        /** times: "HH:mm,HH:mm" (empty string turns reminders off). */
         @JavascriptInterface
-        public void setReminder(int hour, int minute) {
-            Reminders.set(MainActivity.this, hour, minute);
+        public void setReminders(String times) {
+            Reminders.setTimes(MainActivity.this, times);
+            if (times != null && !times.trim().isEmpty()) runOnUiThread(MainActivity.this::askNotificationPermission);
+        }
+
+        @JavascriptInterface
+        public void testNotification() {
             runOnUiThread(() -> {
-                if (Build.VERSION.SDK_INT >= 33
-                        && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                        != PackageManager.PERMISSION_GRANTED) {
-                    requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1);
-                }
+                askNotificationPermission();
+                Reminders.show(MainActivity.this, true);
             });
         }
 
         @JavascriptInterface
-        public void cancelReminder() {
-            Reminders.cancel(MainActivity.this);
+        public boolean notificationsAllowed() {
+            return Reminders.notificationsAllowed(MainActivity.this);
+        }
+
+        @JavascriptInterface
+        public void openNotificationSettings() {
+            runOnUiThread(() -> {
+                Intent i;
+                if (Build.VERSION.SDK_INT >= 26) {
+                    i = new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS);
+                    i.putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName());
+                } else {
+                    i = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                    i.setData(Uri.parse("package:" + getPackageName()));
+                }
+                try {
+                    startActivity(i);
+                } catch (Exception ignored) {
+                }
+            });
+        }
+
+        /** 0 = light tap, 2 = success. */
+        @JavascriptInterface
+        public void haptic(int kind) {
+            if (web == null) return;
+            web.post(() -> {
+                if (web != null) web.performHapticFeedback(kind == 2
+                        ? HapticFeedbackConstants.LONG_PRESS
+                        : HapticFeedbackConstants.KEYBOARD_TAP);
+            });
         }
     }
 }
